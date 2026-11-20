@@ -261,24 +261,89 @@ internal static class SelfTests
         {
             using var icon = TrayApplication.CreateIcon(Color.Blue);
             ClickerSettings? saved = null;
-            using var form = new SettingsForm(new(), icon, () => new(true, false, true, false, 0, 0, null), value => saved = value, () => { });
+            using var form = new SettingsForm(new(), icon, () => new(true, false, true, false, 0, 0, null), value => saved = value, () => { }, () => { });
             form.Show();
             try
             {
                 foreach (int button in new[] { 1, 2 })
                 {
-                    var chooser = form.Controls.OfType<Button>().First(control => control.Text.Contains("сменить") || control.Text.StartsWith("Мышь X"));
+                    var chooser = (Button)form.Controls.Find("HotkeyButton", true).Single();
                     chooser.PerformClick();
                     var down = Message.Create(chooser.Handle, 0x020B, new IntPtr(button << 16), IntPtr.Zero);
                     Check(form.PreFilterMessage(ref down), "Side-button down was not captured");
                     var up = Message.Create(chooser.Handle, 0x020C, new IntPtr(button << 16), IntPtr.Zero);
                     Check(form.PreFilterMessage(ref up), "Captured release was not consumed");
-                    form.Controls.OfType<Button>().First(control => control.Text == "Сохранить").PerformClick();
+                    ((Button)form.Controls.Find("TrayButton", true).Single()).PerformClick();
                     Check(saved?.Hotkey == (int)(button == 1 ? Keys.XButton1 : Keys.XButton2), "Wrong side button saved");
                     Check(!form.PreFilterMessage(ref down), "Side button captured outside selection mode");
                 }
             }
             finally { form.Exiting = true; form.Close(); }
+        });
+        Test("Capture Tab without navigating and consume its repeat and release", () =>
+        {
+            using var icon = TrayApplication.CreateIcon(Color.Blue);
+            ClickerSettings? saved = null;
+            using var form = new SettingsForm(new(), icon, () => new(true, false, true, false, 0, 0, null), value => saved = value, () => { }, () => { });
+            form.Show();
+            var chooser = (Button)form.Controls.Find("HotkeyButton", true).Single();
+            chooser.PerformClick();
+            var down = Message.Create(chooser.Handle, 0x0100, (IntPtr)Keys.Tab, IntPtr.Zero);
+            var repeat = Message.Create(chooser.Handle, 0x0100, (IntPtr)Keys.Return, new IntPtr(1 << 30));
+            var up = Message.Create(chooser.Handle, 0x0101, (IntPtr)Keys.Tab, IntPtr.Zero);
+            Check(form.PreFilterMessage(ref repeat), "A repeat from the key that opened capture leaked");
+            Check(form.PreFilterMessage(ref down) && form.PreFilterMessage(ref down), "Tab escaped capture or leaked its repeat");
+            Check(form.PreFilterMessage(ref up) && !form.PreFilterMessage(ref down), "Tab did not return to normal navigation");
+            ((Button)form.Controls.Find("TrayButton", true).Single()).PerformClick();
+            Check(saved?.Hotkey == (int)Keys.Tab, "Wrong key saved");
+        });
+        Test("Automatic mode keeps the preferred activation across saving and reopening", () =>
+        {
+            using var icon = TrayApplication.CreateIcon(Color.Blue);
+            ClickerSettings? saved = null;
+            using var form = new SettingsForm(new(), icon, () => new(true, false, true, false, 0, 0, null), value => saved = value, () => { }, () => { });
+            form.Show();
+            var mode = (ComboBox)form.Controls.Find("ClickMode", true).Single();
+            var activation = (ComboBox)form.Controls.Find("KeyMode", true).Single();
+            Check(mode.Visible && activation.Visible, "Mode controls are unavailable");
+            mode.SelectedIndex = (int)ClickMode.Automatic;
+            Check(!activation.Enabled && activation.SelectedIndex == (int)ActivationMode.Toggle, "Automatic activation must display toggle");
+            ((Button)form.Controls.Find("TrayButton", true).Single()).PerformClick();
+            Check(saved is { ClickMode: ClickMode.Automatic, Mode: ActivationMode.Hold }, "Automatic mode overwrote the preference");
+            form.LoadSettings(saved!);
+            mode.SelectedIndex = (int)ClickMode.MouseHold;
+            Check(activation.Enabled && activation.SelectedIndex == (int)ActivationMode.Hold, "Previous activation was not restored");
+        });
+        Test("Closing unchanged settings avoids writing, including on a read-only install", () =>
+        {
+            using var icon = TrayApplication.CreateIcon(Color.Blue);
+            bool hidden = false;
+            int writes = 0;
+            using var form = new SettingsForm(new(), icon, () => new(true, false, true, false, 0, 0, null),
+                _ => { writes++; throw new UnauthorizedAccessException(); }, () => hidden = true, () => { });
+            form.Show();
+            form.Close();
+            Check(hidden && writes == 0, "Closing unchanged settings attempted to write");
+        });
+        Test("A failed save leaves the changed settings open and can be retried", () =>
+        {
+            bool hidden = false;
+            int writes = 0;
+            ClickerSettings? saved = null;
+            void Save(ClickerSettings value)
+            {
+                if (++writes == 1) throw new IOException("Test write error");
+                saved = value;
+            }
+            using var icon = TrayApplication.CreateIcon(Color.Blue);
+            using var form = new SettingsForm(new(), icon, () => new(true, false, true, false, 0, 0, null),
+                Save, () => hidden = true, () => { });
+            form.Show();
+            ((ComboBox)form.Controls.Find("ClickMode", true).Single()).SelectedIndex = (int)ClickMode.Automatic;
+            form.Close();
+            Check(!hidden && form.Visible && saved == null, "Failed save hid the window or reported success");
+            form.Close();
+            Check(hidden && saved?.ClickMode == ClickMode.Automatic, "Retry did not save the pending changes");
         });
 
         Test("Automatic mode starts on activation alone and stops on next press", () =>
@@ -313,8 +378,8 @@ internal static class SelfTests
 
     public static int Preview(string path)
     {
-        using var icon = TrayApplication.CreateIcon(Color.FromArgb(59, 130, 246));
-        using var form = new SettingsForm(new(), icon, () => new(true, false, true, false, 0, 0, null), _ => { }, () => { });
+        using var icon = TrayApplication.CreateIcon(Color.FromArgb(129, 140, 248));
+        using var form = new SettingsForm(new(), icon, () => new(true, false, true, false, 0, 0, null), _ => { }, () => { }, () => { });
         form.TopMost = true;
         form.Show();
         ShowWindow(form.Handle, 1);
@@ -344,18 +409,36 @@ internal static class SelfTests
         Capture();
         bitmap.Save(Path.Combine(Path.GetDirectoryName(path) ?? ".", Path.GetFileNameWithoutExtension(path) + "-mouse.png"),
             System.Drawing.Imaging.ImageFormat.Png);
+        form.LoadSettings(new() { ClickMode = ClickMode.Automatic, Hotkey = (int)Keys.XButton2 });
+        Application.DoEvents();
+        Capture();
+        bitmap.Save(Path.Combine(Path.GetDirectoryName(path) ?? ".", Path.GetFileNameWithoutExtension(path) + "-automatic.png"),
+            System.Drawing.Imaging.ImageFormat.Png);
         form.Exiting = true; form.Close();
         return 0;
     }
 
     public static int Smoke(string reportPath)
     {
-        using var app = new TrayApplication();
+        using var app = new TrayApplication(enableClicking: false);
         using var timer = new System.Windows.Forms.Timer { Interval = 350 };
-        timer.Tick += (_, _) => { timer.Stop(); app.ExitThread(); };
+        Point position = default;
+        timer.Tick += (_, _) =>
+        {
+            timer.Stop();
+            var form = Application.OpenForms.OfType<SettingsForm>().Single();
+            position = form.Location;
+            form.WindowState = FormWindowState.Minimized;
+            Check(!form.Visible, "Minimizing did not hide the window in the tray");
+            app.ShowSettings();
+            Check(form.Visible && form.WindowState == FormWindowState.Normal && form.Location == position,
+                $"Restoring from the tray moved the window from {position} to {form.Location}");
+            ((Button)form.Controls.Find("ExitButton", true).Single()).PerformClick();
+        };
         timer.Start();
         Application.Run(app);
-        File.WriteAllText(reportPath, "PASS: normal application startup, settings window, tray icon, native mouse hook, worker and graceful exit.\nNo clicks generated; no settings changed.");
+        Check(!Application.OpenForms.OfType<SettingsForm>().Any(), "Exit left the settings window open");
+        File.WriteAllText(reportPath, $"PASS: startup, tray restore at ({position.X}, {position.Y}), and full shutdown through Exit.\n");
         return 0;
     }
 

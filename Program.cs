@@ -18,6 +18,7 @@ internal static class Program
 
     private static int Run(string[] args)
     {
+        Application.SetUnhandledExceptionMode(UnhandledExceptionMode.ThrowException);
         Application.SetHighDpiMode(HighDpiMode.PerMonitorV2);
         Application.EnableVisualStyles();
         Application.SetCompatibleTextRenderingDefault(false);
@@ -38,7 +39,6 @@ internal static class Program
         try
         {
             using var app = new TrayApplication();
-            Application.ThreadException += (_, e) => { app.ExitThread(); ReportError(e.Exception); };
             Application.Run(app);
             return 0;
         }

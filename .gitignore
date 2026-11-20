@@ -4,4 +4,5 @@ obj/
 verification/
 dist/
 settings.json
+window-position.json
 error.log

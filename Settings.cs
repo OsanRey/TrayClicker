@@ -53,27 +53,72 @@ internal static class SettingsStore
     // Portable: moving the folder also moves the user's preferences.
     public static readonly string DirectoryPath = AppContext.BaseDirectory;
     public static readonly string FilePath = Path.Combine(DirectoryPath, "settings.json");
+    private static readonly string WindowPositionPath = Path.Combine(DirectoryPath, "window-position.json");
+
+    private sealed record WindowPosition
+    {
+        public required int X { get; init; }
+        public required int Y { get; init; }
+    }
 
     public static ClickerSettings Load(out string? warning)
     {
         warning = null;
         try
         {
-            if (!File.Exists(FilePath)) return new();
-            return (JsonSerializer.Deserialize<ClickerSettings>(File.ReadAllText(FilePath)) ?? new()).Validated();
+            var settings = JsonSerializer.Deserialize<ClickerSettings>(File.ReadAllText(FilePath));
+            return settings?.Validated() ?? throw new JsonException("Файл настроек должен содержать объект JSON.");
         }
+        catch (FileNotFoundException) { return new(); }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
         {
-            warning = "Не удалось прочитать настройки. Загружены стандартные значения.\n" + ex.Message;
+            warning = ex.Message;
             return new();
         }
     }
 
-    public static void Save(ClickerSettings settings)
+    public static void Save(ClickerSettings settings) => WriteJson(FilePath, settings);
+
+    public static Point? LoadWindowPosition()
+    {
+        try
+        {
+            var position = JsonSerializer.Deserialize<WindowPosition>(File.ReadAllText(WindowPositionPath));
+            return position == null ? null : new Point(position.X, position.Y);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
+        {
+            return null;
+        }
+    }
+
+    public static bool TrySaveWindowPosition(Point position)
+    {
+        try
+        {
+            WriteJson(WindowPositionPath, new WindowPosition { X = position.X, Y = position.Y });
+            return true;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return false;
+        }
+    }
+
+    private static void WriteJson<T>(string path, T value)
     {
         Directory.CreateDirectory(DirectoryPath);
-        string temp = FilePath + ".tmp";
-        File.WriteAllText(temp, JsonSerializer.Serialize(settings, new JsonSerializerOptions { WriteIndented = true }));
-        File.Move(temp, FilePath, true);
+        string temp = $"{path}.{Guid.NewGuid():N}.tmp";
+        try
+        {
+            File.WriteAllText(temp, JsonSerializer.Serialize(value, new JsonSerializerOptions { WriteIndented = true }));
+            File.Move(temp, path, overwrite: true);
+        }
+        finally
+        {
+            try { File.Delete(temp); }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+        }
     }
 }

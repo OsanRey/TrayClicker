@@ -9,7 +9,7 @@
     <RootNamespace>TrayClicker</RootNamespace>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationIcon>app.ico</ApplicationIcon>
-    <Version>1.0.4</Version>
+    <Version>1.1.2</Version>
     <Product>TrayClicker</Product>
     <Description>Настраиваемый кликер в системном трее</Description>
   </PropertyGroup>
