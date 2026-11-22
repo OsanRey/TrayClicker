@@ -2,7 +2,7 @@ namespace TrayClicker;
 
 internal sealed class SettingsForm : Form, IMessageFilter
 {
-    private static readonly Size LayoutSize = new(500, 350);
+    private static readonly Size LayoutSize = new(500, 383);
     private static readonly Color Canvas = Color.FromArgb(244, 246, 251);
     private static readonly Color Ink = Color.FromArgb(23, 32, 54);
     private static readonly Color Muted = Color.FromArgb(78, 92, 118);
@@ -21,6 +21,11 @@ internal sealed class SettingsForm : Form, IMessageFilter
     private readonly CheckBox rightEnabled = new() { Text = "Правая кнопка", AutoSize = true, TabIndex = 2 };
     private readonly NumericUpDown leftRate = RateBox("Скорость левой кнопки", 1);
     private readonly NumericUpDown rightRate = RateBox("Скорость правой кнопки", 3);
+    private readonly NumericUpDown pressDuration = new()
+    {
+        Name = "PressDuration", AccessibleName = "Нажатие, мс", Maximum = 200, Increment = 5,
+        Width = 82, TextAlign = HorizontalAlignment.Right, TabIndex = 4
+    };
     private readonly NumericUpDown limit = new()
     {
         AccessibleName = "Кликов в серии", Minimum = 1, Maximum = 1_000_000,
@@ -97,11 +102,14 @@ internal sealed class SettingsForm : Form, IMessageFilter
         Place(mouseCard, leftRate, 131, 65);
         Place(mouseCard, rightEnabled, 12, 103);
         Place(mouseCard, rightRate, 131, 101);
+        Place(mouseCard, Caption("Нажатие, мс", 115), 12, 136);
+        Place(mouseCard, pressDuration, 131, 132);
         tips.SetToolTip(leftRate, "От 0,1 до 500 кликов в секунду.");
         tips.SetToolTip(rightRate, "От 0,1 до 500 кликов в секунду.");
+        tips.SetToolTip(pressDuration, "0 — мгновенный клик. Для удержания и отпускания кнопки нужен интервал не короче длительности нажатия плюс 1 мс.");
 
         var activationCard = new CardPanel { Size = new(464, 64), TabIndex = 2 };
-        Place(this, activationCard, 18, 216);
+        Place(this, activationCard, 18, 249);
         Place(activationCard, Heading("Активация", 215, 24, 12), 12, 8);
         Place(activationCard, keyHelp, 12, 34);
         hotkeyButton.Name = "HotkeyButton";
@@ -115,15 +123,15 @@ internal sealed class SettingsForm : Form, IMessageFilter
         Place(activationCard, keyMode, 328, 20);
         tips.SetToolTip(limit, "От 1 до 1 000 000 кликов за одно нажатие мыши.");
 
-        Place(this, feedbackTitle, 18, 293);
-        Place(this, feedbackDetail, 18, 313);
+        Place(this, feedbackTitle, 18, 326);
+        Place(this, feedbackDetail, 18, 346);
         feedbackTitle.Font = new Font(Font, FontStyle.Bold);
         var exitButton = MakeButton("Выход", 76, 3);
         exitButton.Name = "ExitButton";
         var trayButton = MakeButton("Сохранить и в трей", 146, 4, primary: true);
         trayButton.Name = "TrayButton";
-        Place(this, exitButton, 250, 294);
-        Place(this, trayButton, 336, 294);
+        Place(this, exitButton, 250, 327);
+        Place(this, trayButton, 336, 327);
 
         clickMode.SelectedIndexChanged += (_, _) => { UpdateMode(); ClearNotice(); };
         keyMode.SelectedIndexChanged += (_, _) =>
@@ -133,7 +141,7 @@ internal sealed class SettingsForm : Form, IMessageFilter
         };
         leftEnabled.CheckedChanged += (_, _) => { leftRate.Enabled = leftEnabled.Checked; ClearNotice(); };
         rightEnabled.CheckedChanged += (_, _) => { rightRate.Enabled = rightEnabled.Checked; ClearNotice(); };
-        foreach (var box in new[] { limit, leftRate, rightRate })
+        foreach (var box in new[] { limit, leftRate, rightRate, pressDuration })
             box.ValueChanged += (_, _) => ClearNotice();
         hotkeyButton.Click += (_, _) => BeginCapture();
         exitButton.Click += (_, _) => exit();
@@ -168,7 +176,7 @@ internal sealed class SettingsForm : Form, IMessageFilter
         Application.AddMessageFilter(this);
     }
 
-    private static Panel Card(int tabIndex) => new CardPanel { Size = new(225, 135), TabIndex = tabIndex };
+    private static Panel Card(int tabIndex) => new CardPanel { Size = new(225, 168), TabIndex = tabIndex };
 
     internal void RestorePosition(Point position)
     {
@@ -257,6 +265,7 @@ internal sealed class SettingsForm : Form, IMessageFilter
         rightEnabled.Checked = applied.RightEnabled;
         leftRate.Value = applied.LeftCps;
         rightRate.Value = applied.RightCps;
+        pressDuration.Value = applied.PressMilliseconds;
         leftRate.Enabled = applied.LeftEnabled;
         rightRate.Enabled = applied.RightEnabled;
         limit.Value = applied.ClickLimit;
@@ -365,7 +374,8 @@ internal sealed class SettingsForm : Form, IMessageFilter
         {
             Hotkey = hotkey, Mode = preferredKeyMode, ClickMode = (ClickMode)clickMode.SelectedIndex,
             LeftEnabled = leftEnabled.Checked, RightEnabled = rightEnabled.Checked,
-            LeftCps = leftRate.Value, RightCps = rightRate.Value, ClickLimit = (int)limit.Value
+            LeftCps = leftRate.Value, RightCps = rightRate.Value, ClickLimit = (int)limit.Value,
+            PressMilliseconds = (int)pressDuration.Value
         };
         if (!repairSettings && value == applied) return true;
 

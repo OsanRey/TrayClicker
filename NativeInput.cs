@@ -43,6 +43,8 @@ internal static class NativeInput
     private static readonly int InputSize = Marshal.SizeOf<Input>();
     private static readonly Input[] Left = CreatePair(MouseButton.Left);
     private static readonly Input[] Right = CreatePair(MouseButton.Right);
+    private static readonly Input[][] LeftTransitions = [[Left[0]], [Left[1]]];
+    private static readonly Input[][] RightTransitions = [[Right[0]], [Right[1]]];
 
     public static bool IsDown(int key) => (GetAsyncKeyState(key) & 0x8000) != 0;
 
@@ -62,8 +64,18 @@ internal static class NativeInput
         int error = Marshal.GetLastWin32Error();
         // If only down was accepted, always attempt to release the same button.
         if (sent == 1) SendInput(1, [pair[1]], InputSize);
-        throw new InvalidOperationException("Windows не приняла клик. Если целевое приложение запущено от администратора, "
+        throw InputError(error);
+    }
+
+    public static void SetButton(MouseButton button, bool down)
+    {
+        var transitions = button == MouseButton.Left ? LeftTransitions : RightTransitions;
+        if (SendInput(1, transitions[down ? 0 : 1], InputSize) != 1)
+            throw InputError(Marshal.GetLastWin32Error());
+    }
+
+    private static InvalidOperationException InputError(int error) =>
+        new("Windows не приняла событие мыши. Если целевое приложение запущено от администратора, "
             + "запустите кликер с такими же правами."
             + (error == 0 ? "" : "\n" + new Win32Exception(error).Message));
-    }
 }

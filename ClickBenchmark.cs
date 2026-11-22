@@ -9,7 +9,7 @@ namespace TrayClicker;
 // The visible receiving window counts Windows button-up messages, not a mocked click callback.
 internal static class ClickBenchmark
 {
-    private sealed record Request(long Window, double Seconds, bool Legacy, decimal Left, decimal Right, string ResultPath);
+    private sealed record Request(long Window, double Seconds, bool Legacy, decimal Left, decimal Right, int PressMilliseconds, string ResultPath);
     private sealed record Result(decimal LeftTarget, decimal RightTarget, bool Legacy, long SentLeft, long SentRight,
         double Seconds, string? Error);
     private sealed class Receiver : Form
@@ -80,11 +80,14 @@ internal static class ClickBenchmark
                 report.AppendLine($"Receiver handle={form.Handle}, ownRoot={GetAncestor(form.Handle, 2)}, PID={Environment.ProcessId}; hit={root}, PID={rootProcess}, class={windowClass}.");
                 if (root != form.Handle) throw new InvalidOperationException("Тестовое окно перекрыто; клики не запущены.");
                 refresh.Start();
-                var trials = new List<(bool legacy, decimal left, decimal right)>();
+                var trials = new List<(bool legacy, decimal left, decimal right, int pressMilliseconds, double seconds)>
+                {
+                    (false, 100, 0, 5, 15)
+                };
                 foreach (bool legacy in compare ? new[] { true, false } : new[] { false })
-                    foreach (decimal rate in new[] { 52m, 202m, 500m }) trials.Add((legacy, rate, 0));
-                trials.Add((false, 0, 202));
-                trials.Add((false, 202, 500));
+                    foreach (decimal rate in new[] { 52m, 202m, 500m }) trials.Add((legacy, rate, 0, 0, 2));
+                trials.Add((false, 0, 202, 0, 2));
+                trials.Add((false, 202, 500, 0, 2));
                 int trial = 0;
                 foreach (var spec in trials)
                 {
@@ -93,11 +96,11 @@ internal static class ClickBenchmark
                     if (GetAncestor(WindowFromPoint(currentPoint), 2) != form.Handle)
                         throw new OperationCanceledException("Курсор вышел из тестового окна; тест остановлен.");
                     form.LeftCount = form.RightCount = 0;
-                    form.Progress = $"{++trial}/{trials.Count}: {(spec.legacy ? "старый" : "точный")} таймер · Л {spec.left} / П {spec.right} CPS";
+                    form.Progress = $"{++trial}/{trials.Count}: Л {spec.left} / П {spec.right} CPS · нажатие {spec.pressMilliseconds} мс";
                     form.Invalidate();
                     string requestPath = Path.Combine(Path.GetDirectoryName(reportPath)!, $"benchmark-{trial}-request.json");
                     string resultPath = Path.Combine(Path.GetDirectoryName(reportPath)!, $"benchmark-{trial}-result.json");
-                    var request = new Request(form.Handle.ToInt64(), 2, spec.legacy, spec.left, spec.right, resultPath);
+                    var request = new Request(form.Handle.ToInt64(), spec.seconds, spec.legacy, spec.left, spec.right, spec.pressMilliseconds, resultPath);
                     File.WriteAllText(requestPath, JsonSerializer.Serialize(request));
                     var start = new ProcessStartInfo(Environment.ProcessPath!) { UseShellExecute = false, CreateNoWindow = true };
                     start.ArgumentList.Add("--benchmark-worker"); start.ArgumentList.Add(requestPath);
@@ -108,7 +111,7 @@ internal static class ClickBenchmark
                     var result = JsonSerializer.Deserialize<Result>(File.ReadAllText(resultPath))!;
                     double left = form.LeftCount / result.Seconds;
                     double right = form.RightCount / result.Seconds;
-                    string line = $"{(spec.legacy ? "LEGACY" : "PRECISE")}: target L={spec.left}, R={spec.right}; "
+                    string line = $"{(spec.legacy ? "LEGACY" : "PRECISE")}: target L={spec.left}, R={spec.right}; press={spec.pressMilliseconds}ms; "
                         + $"received L={form.LeftCount}, R={form.RightCount}; elapsed={result.Seconds:F4}s; "
                         + $"CPS L={left:F2}, R={right:F2}; sent L={result.SentLeft}, R={result.SentRight}";
                     report.AppendLine(line);
@@ -150,22 +153,37 @@ internal static class ClickBenchmark
         long firstTimestamp = 0;
         long sentLeft = 0, sentRight = 0;
         var settings = new ClickerSettings { ClickMode = ClickMode.MouseHold,
+            PressMilliseconds = request.PressMilliseconds,
             LeftEnabled = request.Left > 0, RightEnabled = request.Right > 0,
             LeftCps = request.Left > 0 ? request.Left : 10, RightCps = request.Right > 0 ? request.Right : 10 };
+        void CheckTarget()
+        {
+            bool cursorRead = GetCursorPos(out var point);
+            IntPtr hit = GetAncestor(WindowFromPoint(point), 2);
+            if (!cursorRead || hit != window || !IsWindowVisible(window))
+                throw new OperationCanceledException($"Курсор вышел из тестового окна; отправка кликов остановлена. Read={cursorRead}, visible={IsWindowVisible(window)}, hit={hit}, target={window}, point={point.X},{point.Y}.");
+        }
+        void CountSend(MouseButton button)
+        {
+            if (firstTimestamp == 0) firstTimestamp = Stopwatch.GetTimestamp();
+            if (button == MouseButton.Left) sentLeft++; else sentRight++;
+        }
         using var service = new ClickerService(settings, mouse,
             _ => new(Volatile.Read(ref running) == 1, NativeInput.IsDown((int)Keys.Escape),
                 request.Left > 0 && Volatile.Read(ref running) == 1,
                 request.Right > 0 && Volatile.Read(ref running) == 1, 0, 0),
             button =>
             {
-                bool cursorRead = GetCursorPos(out var point);
-                IntPtr hit = GetAncestor(WindowFromPoint(point), 2);
-                if (!cursorRead || hit != window || !IsWindowVisible(window))
-                    throw new OperationCanceledException($"Курсор вышел из тестового окна; отправка кликов остановлена. Read={cursorRead}, visible={IsWindowVisible(window)}, hit={hit}, target={window}, point={point.X},{point.Y}.");
+                CheckTarget();
                 NativeInput.Click(button);
-                if (firstTimestamp == 0) firstTimestamp = Stopwatch.GetTimestamp();
-                if (button == MouseButton.Left) sentLeft++; else sentRight++;
-            }, request.Legacy);
+                CountSend(button);
+            }, request.Legacy,
+            (button, down) =>
+            {
+                if (down) CheckTarget();
+                NativeInput.SetButton(button, down);
+                if (down) CountSend(button);
+            });
         service.Suspend(false);
         Thread.Sleep(80); // Ensure the hotkey-release state was observed before arming.
         Volatile.Write(ref running, 1);

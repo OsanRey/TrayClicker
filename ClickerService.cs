@@ -16,6 +16,10 @@ internal sealed class ClickerService : IDisposable
     private readonly PreciseWait preciseWait;
     private readonly Func<int, ClickerInput>? readInput;
     private readonly Action<MouseButton> click;
+    private readonly Action<MouseButton> startClick;
+    private readonly Stopwatch clock = Stopwatch.StartNew();
+    private readonly ClickPulse leftPulse;
+    private readonly ClickPulse rightPulse;
     private readonly bool legacyWait;
     private ClickerSettings settings;
     private bool enabled = true;
@@ -26,16 +30,20 @@ internal sealed class ClickerService : IDisposable
     private bool workerFailed;
 
     public ClickerService(ClickerSettings settings, PhysicalMouse? mouse = null,
-        Func<int, ClickerInput>? readInput = null, Action<MouseButton>? click = null, bool legacyWait = false)
+        Func<int, ClickerInput>? readInput = null, Action<MouseButton>? click = null, bool legacyWait = false,
+        Action<MouseButton, bool>? setButton = null)
     {
         this.mouse = mouse;
         this.readInput = readInput;
         this.click = click ?? NativeInput.Click;
+        startClick = StartClick;
+        leftPulse = new(MouseButton.Left, () => clock.Elapsed.TotalSeconds, setButton ?? NativeInput.SetButton);
+        rightPulse = new(MouseButton.Right, () => clock.Elapsed.TotalSeconds, setButton ?? NativeInput.SetButton);
         this.legacyWait = legacyWait;
         preciseWait = new(quitting.WaitHandle);
         lastLeftPress = mouse?.LeftPress ?? 0;
         lastRightPress = mouse?.RightPress ?? 0;
-        this.settings = settings;
+        this.settings = settings.Validated();
         schedule = new(settings);
         worker = new Thread(Run) { IsBackground = true, Name = "Mouse click scheduler" };
         worker.Start();
@@ -43,26 +51,66 @@ internal sealed class ClickerService : IDisposable
 
     public ClickerStatus Status
     {
-        get { lock (gate) return new(enabled, schedule.Active, suspended, schedule.Armed, schedule.LeftCount, schedule.RightCount, error); }
+        get { lock (gate) return new(enabled, schedule.Active || (schedule.Armed && (leftPulse.IsDown || rightPulse.IsDown)),
+            suspended, schedule.Armed, schedule.LeftCount, schedule.RightCount, error); }
     }
 
     public void Configure(ClickerSettings value)
     {
-        lock (gate) { settings = value.Validated(); schedule.Configure(settings); mouse?.SetSuppression(false, false); if (!workerFailed) error = null; }
+        lock (gate)
+        {
+            if (!workerFailed) error = null;
+            StopClicks();
+            settings = value.Validated();
+            schedule.Configure(settings);
+        }
     }
     public void Suspend(bool value)
     {
-        lock (gate) { suspended = value; schedule.Stop(); mouse?.SetSuppression(false, false); }
+        lock (gate) { suspended = value; StopClicks(); }
     }
     public void SetEnabled(bool value)
     {
-        lock (gate) { enabled = value && !workerFailed; schedule.Stop(); mouse?.SetSuppression(false, false); if (enabled) error = null; }
+        lock (gate)
+        {
+            enabled = value && !workerFailed;
+            if (enabled) error = null;
+            StopClicks();
+        }
     }
-    public void Stop() { lock (gate) { schedule.Stop(); mouse?.SetSuppression(false, false); } }
+    public void Stop() { lock (gate) StopClicks(); }
+
+    private void StartClick(MouseButton button)
+    {
+        if (settings.PressMilliseconds == 0) click(button);
+        else (button == MouseButton.Left ? leftPulse : rightPulse).Press(settings.PressMilliseconds);
+    }
+
+    private void StopClicks()
+    {
+        schedule.Stop();
+        ReleaseButtons();
+    }
+
+    private void ReleaseButtons()
+    {
+        mouse?.SetSuppression(false, false);
+        StopPulse(leftPulse);
+        StopPulse(rightPulse);
+    }
+
+    private void StopPulse(ClickPulse pulse)
+    {
+        try { pulse.Stop(); }
+        catch (Exception ex)
+        {
+            enabled = false;
+            error ??= ex.Message;
+        }
+    }
 
     private void Run()
     {
-        var clock = Stopwatch.StartNew();
         bool timerRaised = false;
         try
         {
@@ -83,20 +131,26 @@ internal sealed class ClickerService : IDisposable
                         bool rightPressed = rightPress != lastRightPress;
                         lastLeftPress = leftPress;
                         lastRightPress = rightPress;
+                        double now = clock.Elapsed.TotalSeconds;
+                        if (now >= leftPulse.ReleaseAt) leftPulse.Release();
+                        if (now >= rightPulse.ReleaseAt) rightPulse.Release();
                         schedule.Tick(clock.Elapsed.TotalSeconds, input.Key, input.Escape,
-                            enabled && !suspended && error == null, click, input.Left, input.Right, leftPressed, rightPressed);
+                            enabled && !suspended && error == null, startClick, input.Left, input.Right, leftPressed, rightPressed,
+                            leftPulse.ReadyAt, rightPulse.ReadyAt);
+                        if (!schedule.Armed && (leftPulse.IsDown || rightPulse.IsDown)) ReleaseButtons();
                     }
                     catch (Exception ex)
                     {
-                        schedule.Stop();
                         enabled = false;
                         error = ex.Message;
+                        StopClicks();
                     }
                     if (readInput == null) mouse?.SetSuppression(
                         schedule.Armed && settings.ClickMode != ClickMode.Automatic && settings.LeftEnabled,
                         schedule.Armed && settings.ClickMode != ClickMode.Automatic && settings.RightEnabled);
                     active = schedule.Armed;
-                    nextDue = schedule.NextDue;
+                    nextDue = schedule.GetNextDue(leftPulse.ReadyAt, rightPulse.ReadyAt);
+                    if (active) nextDue = Math.Min(nextDue, Math.Min(leftPulse.ReleaseAt, rightPulse.ReleaseAt));
                 }
                 if (legacyWait)
                 {
@@ -115,8 +169,9 @@ internal sealed class ClickerService : IDisposable
         {
             lock (gate)
             {
-                workerFailed = true; enabled = false; schedule.Stop(); mouse?.SetSuppression(false, false);
+                workerFailed = true; enabled = false;
                 error = "Ошибка таймера. Перезапустите кликер.\n" + ex.Message;
+                StopClicks();
             }
         }
         finally { if (timerRaised) NativeInput.timeEndPeriod(1); }
@@ -124,7 +179,7 @@ internal sealed class ClickerService : IDisposable
 
     public void Dispose()
     {
-        lock (gate) { enabled = false; schedule.Stop(); mouse?.SetSuppression(false, false); }
+        lock (gate) { enabled = false; StopClicks(); }
         quitting.Set();
         worker.Join();
         preciseWait.Dispose();

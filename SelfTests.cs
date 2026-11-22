@@ -199,12 +199,121 @@ internal static class SelfTests
         Test("Settings range validation and JSON round-trip", () =>
         {
             var v = new ClickerSettings { Hotkey = (int)Keys.Escape, Mode = (ActivationMode)99, ClickMode = (ClickMode)99,
-                LeftCps = -1, RightCps = 9_999, ClickLimit = 0, LeftEnabled = false, RightEnabled = false }.Validated();
+                LeftCps = -1, RightCps = 9_999, ClickLimit = 0, PressMilliseconds = 250, LeftEnabled = false, RightEnabled = false }.Validated();
             Check(v.Hotkey == (int)Keys.F6 && v.Mode == ActivationMode.Hold && v.ClickMode == ClickMode.Count && v.LeftCps == .1m
-                && v.RightCps == 500 && v.ClickLimit == 1 && v.LeftEnabled, "Invalid preferences passed through");
+                && v.RightCps == 500 && v.ClickLimit == 1 && v.PressMilliseconds == 200 && v.LeftEnabled, "Invalid preferences passed through");
             var original = new ClickerSettings { Hotkey = (int)Keys.F8, Mode = ActivationMode.Toggle, ClickMode = ClickMode.MouseHold,
-                LeftEnabled = false, RightEnabled = true, RightCps = 17.5m, ClickLimit = 31 };
+                LeftEnabled = false, RightEnabled = true, RightCps = 17.5m, ClickLimit = 31, PressMilliseconds = 35 };
             Check(JsonSerializer.Deserialize<ClickerSettings>(JsonSerializer.Serialize(original)) == original, "JSON changed settings");
+            Check(JsonSerializer.Deserialize<ClickerSettings>("{\"LeftCps\":15}")?.PressMilliseconds == 20,
+                "Older settings must receive the default duration");
+        });
+        Test("Timed count mode: hold, release, and wait before pressing again", () =>
+        {
+            var schedule = new ClickSchedule(new() { LeftCps = 500, ClickLimit = 2 });
+            var transitions = new List<bool>();
+            double now = 0;
+            var pulse = new ClickPulse(MouseButton.Left, () => now, (_, down) => transitions.Add(down));
+            void Tick(double time, bool key = true, bool leftPress = false)
+            {
+                now = time;
+                if (now >= pulse.ReleaseAt) pulse.Release();
+                schedule.Tick(now, key, false, true, _ => pulse.Press(20), leftPressed: leftPress, leftReady: pulse.ReadyAt);
+            }
+            Tick(0, key: false);
+            Tick(.01, leftPress: true);
+            Tick(.029);
+            Check(transitions.SequenceEqual([true]), "Click released early or pressed twice");
+            Tick(.040); // Late wake-up: measure the up interval from the actual release.
+            Tick(.0405);
+            Check(transitions.SequenceEqual([true, false]) && Math.Abs(schedule.GetNextDue(pulse.ReadyAt, 0) - .041) < .000001,
+                "A late release shortened the up interval");
+            Tick(.0415);
+            Tick(.062);
+            Tick(.120);
+            Check(transitions.SequenceEqual([true, false, true, false]) && schedule.LeftCount == 2 && !pulse.IsDown,
+                "The final click must complete after the series reaches its count");
+        });
+        Test("Timed button cancellation sends one matching release", () =>
+        {
+            var transitions = new List<(MouseButton, bool)>();
+            var pulse = new ClickPulse(MouseButton.Right, () => 0, (button, down) => transitions.Add((button, down)));
+            pulse.Press(50);
+            pulse.Stop();
+            pulse.Stop();
+            Check(transitions.SequenceEqual([(MouseButton.Right, true), (MouseButton.Right, false)]) && pulse.ReadyAt == 0,
+                "Cancellation must release the button once and clear the delay");
+        });
+        Test("100 CPS with 5 ms presses keeps the 10 ms grid despite timer jitter", () =>
+        {
+            var schedule = new ClickSchedule(new() { ClickMode = ClickMode.Automatic, LeftCps = 100, PressMilliseconds = 5 });
+            double now = 0;
+            double lastDown = 0;
+            double firstDown = 0;
+            double lastUp = -1;
+            int count = 0;
+            var pulse = new ClickPulse(MouseButton.Left, () => now, (_, down) =>
+            {
+                if (down)
+                {
+                    Check(now - lastUp >= .001 - .000001, "Released interval was too short");
+                    if (count++ == 0) firstDown = now;
+                    lastDown = now;
+                }
+                else
+                {
+                    Check(now - lastDown >= .005 - .000001, "Hold duration was too short");
+                    lastUp = now;
+                }
+            });
+            void Tick(double time, bool key = true)
+            {
+                now = time;
+                if (now >= pulse.ReleaseAt) pulse.Release();
+                schedule.Tick(now, key, false, true, _ => pulse.Press(5), leftReady: pulse.ReadyAt);
+            }
+            Tick(0, key: false);
+            Tick(.01);
+            for (int i = 1; i <= 1500; i++)
+            {
+                Tick(i * .01 + .0058);
+                if (i < 1500) Tick(i * .01 + .0106);
+            }
+            Check(count == 1500 && !pulse.IsDown && Math.Abs(lastDown - firstDown - 14.99) < .001,
+                "Late wakes reduced 100 CPS below its target");
+        });
+        Test("Worker sends timed transitions and Escape releases an active click", () =>
+        {
+            using var idleRead = new ManualResetEventSlim();
+            using var pressed = new ManualResetEventSlim();
+            using var released = new ManualResetEventSlim();
+            int input = 0;
+            int releases = 0;
+            using var service = new ClickerService(new() { ClickMode = ClickMode.Automatic, PressMilliseconds = 200 },
+                readInput: _ =>
+                {
+                    int state = Volatile.Read(ref input);
+                    if (state == 0) idleRead.Set();
+                    return new(state == 1, state == 2, false, false, 0, 0);
+                },
+                setButton: (_, down) =>
+                {
+                    if (down) pressed.Set();
+                    else
+                    {
+                        Interlocked.Increment(ref releases);
+                        released.Set();
+                    }
+                });
+            service.Suspend(false);
+            Check(idleRead.Wait(1000), "Worker did not read idle input");
+            _ = service.Status; // Wait for the observed idle tick to finish.
+            Volatile.Write(ref input, 1);
+            Check(pressed.Wait(1000), "Worker did not send a timed press");
+            Volatile.Write(ref input, 2);
+            Check(released.Wait(1000), "Worker did not release the button");
+            Check(!service.Status.Armed && service.Status.LeftCount == 1 && releases == 1 && service.Status.Error == null,
+                "Escape did not stop timed output cleanly");
         });
         Test("Native INPUT layout and complete down/up pairs", () =>
         {

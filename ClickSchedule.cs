@@ -16,9 +16,16 @@ internal sealed class ClickSchedule
     public bool Active { get; private set; }
     public long LeftCount { get; private set; }
     public long RightCount { get; private set; }
-    public double NextDue => !Armed ? double.PositiveInfinity : settings.ClickMode == ClickMode.Count
-        ? Math.Min(leftBurst ? nextLeft : double.PositiveInfinity, rightBurst ? nextRight : double.PositiveInfinity)
-        : Math.Min(leftWasHeld ? nextLeft : double.PositiveInfinity, rightWasHeld ? nextRight : double.PositiveInfinity);
+    public double NextDue => GetNextDue(0, 0);
+
+    public double GetNextDue(double leftReady, double rightReady)
+    {
+        if (!Armed) return double.PositiveInfinity;
+        bool leftRunning = settings.ClickMode == ClickMode.Count ? leftBurst : leftWasHeld;
+        bool rightRunning = settings.ClickMode == ClickMode.Count ? rightBurst : rightWasHeld;
+        return Math.Min(leftRunning ? Math.Max(nextLeft, leftReady) : double.PositiveInfinity,
+            rightRunning ? Math.Max(nextRight, rightReady) : double.PositiveInfinity);
+    }
 
     private static double Advance(double previous, double now, decimal cps)
     {
@@ -39,7 +46,8 @@ internal sealed class ClickSchedule
     }
 
     public void Tick(double now, bool keyDown, bool escapeDown, bool allowed, Action<MouseButton> click,
-        bool leftHeld = false, bool rightHeld = false, bool leftPressed = false, bool rightPressed = false)
+        bool leftHeld = false, bool rightHeld = false, bool leftPressed = false, bool rightPressed = false,
+        double leftReady = 0, double rightReady = 0)
     {
         if (!allowed || escapeDown)
         {
@@ -85,17 +93,19 @@ internal sealed class ClickSchedule
             bool leftRunning = settings.LeftEnabled && (automatic || leftHeld);
             bool rightRunning = settings.RightEnabled && (automatic || rightHeld);
             Active = leftRunning || rightRunning;
-            if (leftRunning && (!leftWasHeld || now >= nextLeft))
+            if (leftRunning && !leftWasHeld) nextLeft = now;
+            if (rightRunning && !rightWasHeld) nextRight = now;
+            if (leftRunning && now >= Math.Max(nextLeft, leftReady))
             {
                 click(MouseButton.Left);
                 LeftCount++;
-                nextLeft = Advance(leftWasHeld ? nextLeft : now, now, settings.LeftCps);
+                nextLeft = Advance(nextLeft, now, settings.LeftCps);
             }
-            if (rightRunning && (!rightWasHeld || now >= nextRight))
+            if (rightRunning && now >= Math.Max(nextRight, rightReady))
             {
                 click(MouseButton.Right);
                 RightCount++;
-                nextRight = Advance(rightWasHeld ? nextRight : now, now, settings.RightCps);
+                nextRight = Advance(nextRight, now, settings.RightCps);
             }
             leftWasHeld = leftRunning;
             rightWasHeld = rightRunning;
@@ -115,14 +125,14 @@ internal sealed class ClickSchedule
             RightCount = 0;
             nextRight = now;
         }
-        if (leftBurst && now >= nextLeft)
+        if (leftBurst && now >= Math.Max(nextLeft, leftReady))
         {
             click(MouseButton.Left);
             LeftCount++;
             nextLeft = Advance(nextLeft, now, settings.LeftCps);
             if (LeftCount >= settings.ClickLimit) leftBurst = false;
         }
-        if (rightBurst && now >= nextRight)
+        if (rightBurst && now >= Math.Max(nextRight, rightReady))
         {
             click(MouseButton.Right);
             RightCount++;

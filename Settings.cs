@@ -15,6 +15,7 @@ internal sealed record ClickerSettings
     public bool RightEnabled { get; init; }
     public decimal LeftCps { get; init; } = 10;
     public decimal RightCps { get; init; } = 10;
+    public int PressMilliseconds { get; init; } = 20;
     public int ClickLimit { get; init; } = 20;
 
     public static bool IsValidHotkey(int key) => key is > 0 and < 255
@@ -32,6 +33,7 @@ internal sealed record ClickerSettings
         ClickMode = Enum.IsDefined(ClickMode) ? ClickMode : ClickMode.Count,
         LeftCps = Math.Clamp(LeftCps, 0.1m, 500m),
         RightCps = Math.Clamp(RightCps, 0.1m, 500m),
+        PressMilliseconds = Math.Clamp(PressMilliseconds, 0, 200),
         ClickLimit = Math.Clamp(ClickLimit, 1, 1_000_000),
         LeftEnabled = LeftEnabled || !RightEnabled
     };
